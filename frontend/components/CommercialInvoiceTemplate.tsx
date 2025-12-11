@@ -3,7 +3,7 @@ export function CommercialInvoiceTemplate({ hasErrors }: { hasErrors: boolean })
     <>
       <div style={{ textAlign: 'center', fontSize: '24pt', fontWeight: 'bold', marginBottom: '30px', textDecoration: 'underline' }} contentEditable="false" suppressContentEditableWarning>
         COMMERCIAL INVOICE
-      </div>
+      </div> 
 
       <div style={{ border: '2px solid #000' }}>
         {/* Row 1: Shipper & Invoice Details */}
