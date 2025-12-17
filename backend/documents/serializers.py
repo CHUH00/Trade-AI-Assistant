@@ -53,21 +53,32 @@ class UserSerializer(serializers.ModelSerializer):
             'password': {'write_only': True}
         }
 
+    def validate_emp_no(self, value):
+        """수정 시 사원번호 중복 검증 (본인 제외)"""
+        if self.instance and self.instance.emp_no == value:
+            return value  # 본인 사원번호는 허용
+        if User.objects.filter(emp_no=value).exists():
+            raise serializers.ValidationError('이미 존재하는 사원번호입니다.')
+        return value
+
 
 class UserCreateSerializer(serializers.ModelSerializer):
     """사용자 생성 Serializer"""
 
     class Meta:
         model = User
-        fields = ['emp_no', 'name', 'password', 'dept', 'user_role']
-        extra_kwargs = {
-            'password': {'write_only': True}
-        }
+        fields = ['emp_no', 'name', 'dept', 'user_role']
+
+    def validate_emp_no(self, value):
+        """사원번호 중복 검증"""
+        if User.objects.filter(emp_no=value).exists():
+            raise serializers.ValidationError('이미 존재하는 사원번호입니다.')
+        return value
 
     def create(self, validated_data):
-        password = validated_data.pop('password')
         user = User(**validated_data)
-        user.set_password(password)
+        # 초기 비밀번호를 "a123456!"로 설정
+        user.set_password('a123456!')
         user.save()
         return user
 
@@ -171,6 +182,9 @@ class DocumentSerializer(serializers.ModelSerializer):
             'mime_type',
             'upload_status',
             'error_message',
+            'extracted_text',
+            'converted_pdf_key',
+            'converted_pdf_url',
             'qdrant_point_ids',
             'latest_version',
             'version_count',

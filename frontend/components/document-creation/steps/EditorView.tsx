@@ -10,9 +10,15 @@ interface EditorViewProps {
   activeShippingDoc: ShippingDocType | null;
   editorRef: RefObject<ContractEditorRef | null>;
   initialContent: string;
+  editorKey?: number;
   onBack: () => void;
   onShippingDocChange: (doc: ShippingDocType) => void;
   onChange: (content: string) => void;
+  onRowAdded?: (fieldIds: string[]) => void;
+  onRowDeleted?: (fieldIds: string[]) => void;
+  onUpdate?: () => void;
+  highlightedFieldId?: string | null;
+  onFieldEdit?: (fieldId: string) => void;
 }
 
 export default function EditorView({
@@ -21,11 +27,17 @@ export default function EditorView({
   activeShippingDoc,
   editorRef,
   initialContent,
+  editorKey = 0,
   onBack,
   onShippingDocChange,
   onChange,
+  onRowAdded,
+  onRowDeleted,
+  onUpdate,
   showFieldHighlight,
-  showAgentHighlight
+  showAgentHighlight,
+  highlightedFieldId,
+  onFieldEdit
 }: EditorViewProps & {
   showFieldHighlight: boolean;
   showAgentHighlight: boolean;
@@ -36,15 +48,20 @@ export default function EditorView({
   return (
     <div className="flex flex-col h-full">
       <ContractEditor
-        key={`${currentStep}-${activeShippingDoc || 'default'}`}
+        key={`${currentStep}-${activeShippingDoc || 'default'}-${editorKey}`}
         ref={editorRef as RefObject<ContractEditorRef>}
         className="flex-1 min-h-0"
         initialContent={initialContent}
         onChange={onChange}
+        onUpdate={onUpdate}
+        onRowAdded={onRowAdded}
+        onRowDeleted={onRowDeleted}
         showFieldHighlight={showFieldHighlight}
         showAgentHighlight={showAgentHighlight}
         defaultFontFamily={defaultFontFamily}
         defaultFontSize={defaultFontSize}
+        highlightedFieldId={highlightedFieldId}
+        onFieldEdit={onFieldEdit}
       />
     </div>
   );

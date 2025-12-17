@@ -2,14 +2,15 @@
 Django>=5.2.8
 djangorestframework>=3.14.0
 django-cors-headers>=4.3.0
+django-storages>=1.14.0
 
 # Database
-mysqlclient>=2.2.0
+PyMySQL>=1.1.2
 
 # Environment
 python-dotenv>=1.0.0
 
-# AI/MLtre
+# AI/ML
 openai>=2.8.1
 openai-agents>=0.6.1
 langchain-core>=1.1.0
@@ -18,15 +19,34 @@ langchain-text-splitters>=1.0.0
 tavily-python>=0.7.13
 langfuse>=2.0.0
 
-# Data Processing (already installed)
+# Data Processing
 pandas>=2.3.3
 numpy>=2.3.5
 openpyxl>=3.1.5
 
-# Vector Database (already installed)
+# Vector Database
 qdrant-client>=1.16.1
+mem0ai>=0.1.0
 
-# Utils (already installed)
-PyMySQL>=1.1.2
+# AWS
+boto3>=1.35.0
+
+# PDF Processing
+pymupdf>=1.24.0
+
+# HTTP & Data Validation
+httpx>=0.28.0
+pydantic>=2.10.0
+
+# Utils
 requests>=2.32.5
 python-multipart>=0.0.20
+
+# HWP Processing
+pyhwp>=0.1b15
+
+# DOCX Processing
+python-docx>=1.1.0
+
+# ASGI Server
+uvicorn[standard]>=0.30.0

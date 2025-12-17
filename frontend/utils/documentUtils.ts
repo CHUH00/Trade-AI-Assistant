@@ -36,9 +36,11 @@ export function extractDataFromContent(content: string): Record<string, string> 
   fields.forEach(field => {
     const key = field.getAttribute('data-field-id');
     const value = field.textContent;
+    const source = field.getAttribute('data-source');
 
     // placeholder가 아닌 첫 번째 값만 저장
-    if (key && value && value !== `[${key}]`) {
+    // 자동 계산 필드(data-source="auto")는 제외 - 각 문서에서 독립적으로 계산되어야 함
+    if (key && value && value !== `[${key}]` && source !== 'auto') {
       if (!newData[key]) {
         newData[key] = value;
       }
@@ -67,7 +69,10 @@ export function updateContentWithSharedData(
   let modified = false;
   fields.forEach(field => {
     const key = field.getAttribute('data-field-id');
-    if (key && sharedData[key]) {
+    const source = field.getAttribute('data-source');
+
+    // 자동 계산 필드(data-source="auto")는 건드리지 않음 - 각 문서에서 독립적으로 계산됨
+    if (key && sharedData[key] && source !== 'auto') {
       if (field.textContent !== sharedData[key]) {
         field.textContent = sharedData[key];
         field.setAttribute('data-source', 'mapped');
@@ -130,16 +135,69 @@ export function checkStepCompletion(content: string): boolean {
   const doc = parser.parseFromString(content, 'text/html');
   const fields = doc.querySelectorAll('span[data-field-id]');
 
+  // [ADDED] Validate Radio/Checkbox Groups
+  // Ensure at least one option is selected for each group
+  const groupElements = doc.querySelectorAll('[data-group]');
+  const groups = new Set<string>();
+  groupElements.forEach(el => {
+    const group = el.getAttribute('data-group');
+    if (group) groups.add(group);
+  });
+
+  // [ADDED] Conditional Validation Logic for Payment Fields
+  // 1. Collect all linked fields in the 'payment' group
+  const paymentRadios = doc.querySelectorAll('[data-group="payment"]');
+  const allLinkedFields = new Set<string>();
+  let selectedLinkedField: string | null = null;
+  let isPaymentSelected = false;
+
+  paymentRadios.forEach(radio => {
+    const linkedField = radio.getAttribute('data-linked-field');
+    if (linkedField) allLinkedFields.add(linkedField);
+
+    const isChecked = radio.classList.contains('checked') || radio.getAttribute('data-checked') === 'true';
+    if (isChecked) {
+      isPaymentSelected = true;
+      if (linkedField) selectedLinkedField = linkedField;
+    }
+  });
+
+  for (const group of groups) {
+    const options = doc.querySelectorAll(`[data-group="${group}"]`);
+    let hasSelection = false;
+    for (const option of options) {
+      if (option.getAttribute('data-checked') === 'true') {
+        hasSelection = true;
+        break;
+      }
+    }
+    if (!hasSelection) return false;
+  }
+
   // placeholder가 남아있는 필드가 있으면 미완료
   for (const field of fields) {
     const key = field.getAttribute('data-field-id');
     const value = field.textContent;
+
+    // [CHANGED] Skip validation for optional fields (including dynamic IDs like notice_2)
+    if (key && key.startsWith('notice')) continue;
+
+    // [ADDED] Skip validation for disabled fields
+    if (field.getAttribute('data-disabled') === 'true') continue;
+
+    // [ADDED] Conditional Skip for Payment Fields
+    // If this field is one of the linked fields (e.g. days_dpc), but NOT the one selected, skip it.
+    if (key && allLinkedFields.has(key)) {
+      // If no payment is selected, or the selected payment doesn't require this specific field, skip it.
+      if (key !== selectedLinkedField) continue;
+    }
+
     if (key && value === `[${key}]`) {
       return false;
     }
   }
 
-  return fields.length > 0;
+  return true;
 }
 
 /**
@@ -159,4 +217,43 @@ export function getDocKeyForStep(
     return -1; // Dashboard mode
   }
   return -1;
+}
+
+/**
+ * TipTap 에디터에서 미작성 필드 목록을 반환 (문서 상단 → 하단 순서)
+ * @param rootElement - TipTap 에디터 DOM 요소
+ * @returns 미작성 필드 ID 배열
+ */
+export function findUnfilledFields(rootElement: HTMLElement): string[] {
+  if (!rootElement) return [];
+
+  // TipTap uses ReactNodeViewRenderer which doesn't preserve data-field-id in DOM
+  // Instead, we need to look for .data-field-node elements and check their text content
+  const fieldNodes = rootElement.querySelectorAll('.data-field-node');
+
+  const unfilledFields: string[] = [];
+
+  fieldNodes.forEach(fieldNode => {
+    const textContent = fieldNode.textContent || '';
+
+    // Check if it's a placeholder format: [field_name]
+    const placeholderMatch = textContent.match(/^\[([^\]]+)\]$/);
+
+    if (placeholderMatch) {
+      const fieldId = placeholderMatch[1];
+
+      // 선택적 필드(notice) 제외
+      if (!fieldId.startsWith('notice')) {
+        // Check if disabled by looking for disabled class or opacity
+        const isDisabled = fieldNode.classList.contains('cursor-not-allowed') ||
+          fieldNode.classList.contains('opacity-60');
+
+        if (!isDisabled) {
+          unfilledFields.push(fieldId);
+        }
+      }
+    }
+  });
+
+  return unfilledFields;
 }

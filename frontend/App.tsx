@@ -3,9 +3,16 @@ import MainPage from './components/MainPage';
 import ChatPage from './components/ChatPage';
 import DocumentCreationPage from './components/DocumentCreationPage';
 import LoginPage from './components/LoginPage';
+import AdminPage from './components/AdminPage';
 import { User, api, Trade } from './utils/api';
+import { checkStepCompletion, hydrateTemplate } from './utils/documentUtils';
+import { offerSheetTemplateHTML } from './templates/offerSheet';
+import { proformaInvoiceTemplateHTML } from './templates/proformaInvoice';
+import { saleContractTemplateHTML } from './templates/saleContract';
+import { commercialInvoiceTemplateHTML } from './templates/commercialInvoice';
+import { packingListTemplateHTML } from './templates/packingList';
 
-export type PageType = 'main' | 'chat' | 'documents';
+export type PageType = 'main' | 'chat' | 'documents' | 'admin';
 export type TransitionType = 'none' | 'expanding' | 'shrinking';
 
 export interface DocumentData {
@@ -29,170 +36,281 @@ export interface SavedDocument {
     timestamp: number;
     data: DocumentData;
     step: number;
+    isUpload?: boolean;
+    uploadInfo?: {
+      s3_key: string;
+      s3_url: string;
+      filename: string;
+      convertedPdfUrl?: string;
+    };
   }[];
   tradeData?: Trade; // 백엔드 Trade 원본 데이터
 }
+
+// sessionStorage에서 문서 작성 상태 복원
+const getSessionState = () => {
+  try {
+    return {
+      currentPage: (sessionStorage.getItem('currentPage') as PageType) || 'main',
+      currentStep: Number(sessionStorage.getItem('currentStep')) || 0,
+      documentData: JSON.parse(sessionStorage.getItem('documentData') || '{}'),
+      currentDocId: sessionStorage.getItem('currentDocId'),
+      currentDocIds: JSON.parse(sessionStorage.getItem('currentDocIds') || 'null'),
+    };
+  } catch {
+    return { currentPage: 'main' as PageType, currentStep: 0, documentData: {}, currentDocId: null, currentDocIds: null };
+  }
+};
 
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [userEmail, setUserEmail] = useState('');
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [currentPage, setCurrentPage] = useState<PageType>('main');
-  const [currentStep, setCurrentStep] = useState(0);
-  const [documentData, setDocumentData] = useState<DocumentData>({});
+
+  const sessionState = getSessionState();
+  const [currentPage, setCurrentPage] = useState<PageType>(sessionState.currentPage);
+  const [currentStep, setCurrentStep] = useState(sessionState.currentStep);
+  const [documentData, setDocumentData] = useState<DocumentData>(sessionState.documentData);
   const [transition, setTransition] = useState<TransitionType>('none');
   const [logoPosition, setLogoPosition] = useState({ x: 0, y: 0 });
   const [docSessionId, setDocSessionId] = useState<string>(Date.now().toString());
 
-  const handleNavigate = (page: PageType) => {
+  const handleNavigate = async (page: PageType) => {
     if (page === 'main') {
       setCurrentDocId(null);
+      setCurrentDocIds(null);
+      setDocumentData({});
+      setCurrentStep(0);
     }
 
     if (page === 'documents') {
-      // If we are navigating to documents and don't have an ID, it's a new document
-      // (handleOpenDocument sets the ID before navigating)
-      if (!currentDocId) {
-        setCurrentStep(1);
-        setDocumentData({});
-        setCurrentActiveShippingDoc(null);
-        setDocSessionId(Date.now().toString()); // New session for new document
-      }
+      // 새 문서 작성 시 항상 초기화 (handleOpenDocument는 setCurrentPage 직접 호출하므로 영향 없음)
+      setCurrentDocId(null);
+      setCurrentDocIds(null);
+      setCurrentStep(1);
+      setDocumentData({});
+      setCurrentActiveShippingDoc(null);
+      setDocSessionId(Date.now().toString());
     }
     setCurrentPage(page);
   };
 
-  const handleOpenDocument = (doc: SavedDocument) => {
-    setCurrentDocId(doc.id);
-    // Resume Document: Load content and go to Step 1
-    if (doc.content) {
-      setDocumentData(doc.content);
-    }
-    setCurrentStep(doc.lastStep || 1); // Resume from last step or default to 1
-    const shippingDoc = doc.lastActiveShippingDoc || null;
-    setCurrentActiveShippingDoc(shippingDoc);
-    setDocSessionId(Date.now().toString()); // New session for opened document
-
-    // Use setTimeout to ensure state is set before navigation
-    setTimeout(() => {
-      setCurrentPage('documents');
-    }, 0);
-  };
-
-  // 로고 클릭으로 채팅 열기 (확장 애니메이션)
-  const handleOpenChat = (logoRect: DOMRect) => {
-    setLogoPosition({
-      x: logoRect.left + logoRect.width / 2,
-      y: logoRect.top + logoRect.height / 2
-    });
-    setTransition('expanding');
-
-    // 애니메이션 완료 후 상태 정리
-    setTimeout(() => {
-      setTransition('none');
-      setCurrentPage('chat');
-    }, 500);
-  };
-
-  // 로고 클릭으로 채팅 닫기 (축소 애니메이션)
-  const handleCloseChat = (logoRect: DOMRect) => {
-    setLogoPosition({
-      x: logoRect.left + logoRect.width / 2,
-      y: logoRect.top + logoRect.height / 2
-    });
-    setTransition('shrinking');
-
-    // 애니메이션 완료 후 상태 정리
-    setTimeout(() => {
-      setTransition('none');
-      setCurrentPage('main');
-    }, 500);
-  };
+  const [isNewTrade, setIsNewTrade] = useState(false);
   const [savedDocuments, setSavedDocuments] = useState<SavedDocument[]>([]);
   const [isLoadingTrades, setIsLoadingTrades] = useState(false);
 
-  // doc_type을 step으로 변환
+  const generateUniqueTitle = useCallback((baseTitle: string = '새 문서'): string => {
+    const existingTitles = savedDocuments.map(doc => doc.name);
+    if (!existingTitles.includes(baseTitle)) return baseTitle;
+
+    const regex = new RegExp(`^${baseTitle} (\\d+)$`);
+    let maxNumber = 0;
+    existingTitles.forEach(title => {
+      const match = title.match(regex);
+      if (match) maxNumber = Math.max(maxNumber, parseInt(match[1]));
+    });
+    return `${baseTitle} ${maxNumber + 1}`;
+  }, [savedDocuments]);
+
+  const createNewTrade = async (): Promise<{ tradeId: string; docIds: Record<string, number> } | null> => {
+    if (currentDocId || !currentUser) {
+      return currentDocId ? { tradeId: currentDocId, docIds: currentDocIds || {} } : null;
+    }
+
+    try {
+      const API_URL = import.meta.env.VITE_DJANGO_API_URL || 'http://localhost:8000';
+      const response = await fetch(`${API_URL}/api/trade/init/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: currentUser.emp_no, title: generateUniqueTitle('새 문서') })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const tradeId = data.trade_id.toString();
+        setCurrentDocId(tradeId);
+        setCurrentDocIds(data.doc_ids);
+        setIsNewTrade(true);
+        return { tradeId, docIds: data.doc_ids };
+      }
+    } catch (error) {
+      console.error('[App] Trade 생성 오류:', error);
+    }
+    return null;
+  };
+
+  const handleDocumentExit = async () => {
+    if (isNewTrade && currentDocId) {
+      try {
+        await api.deleteTrade(parseInt(currentDocId));
+        await fetchTrades();
+      } catch (error) {
+        console.error('[App] Failed to delete new trade:', error);
+      }
+    }
+    setCurrentDocId(null);
+    setCurrentDocIds(null);
+    setIsNewTrade(false);
+  };
+
+  const handleOpenDocument = (doc: SavedDocument, initialStep?: number) => {
+    setCurrentDocId(doc.id);
+
+    const content: DocumentData = { ...doc.content };
+    const docIds: Record<string, number> = {};
+    const uploadedFileUrls: Record<number, string> = {};
+    const uploadedConvertedPdfUrls: Record<number, string> = {};
+
+    doc.tradeData?.documents?.forEach((d: any) => {
+      docIds[d.doc_type] = d.doc_id;
+      const step = docTypeToStep(d.doc_type);
+
+      if (d.doc_mode) content.stepModes = { ...content.stepModes, [step]: d.doc_mode };
+      if (d.upload_status === 'ready' && d.original_filename) {
+        content.uploadedFileNames = { ...content.uploadedFileNames, [step]: d.original_filename };
+        if (d.s3_url) uploadedFileUrls[step] = d.s3_url;
+        if (d.converted_pdf_url) uploadedConvertedPdfUrls[step] = d.converted_pdf_url;
+      }
+    });
+
+    setCurrentDocIds(docIds);
+    setDocumentData({ ...content, uploadedFileUrls, uploadedConvertedPdfUrls });
+
+    const targetStep = initialStep || doc.lastStep || 1;
+    if (targetStep === 4) {
+      setCurrentStep(4);
+      setCurrentActiveShippingDoc('CI');
+    } else if (targetStep === 5) {
+      setCurrentStep(4);
+      setCurrentActiveShippingDoc('PL');
+    } else {
+      setCurrentStep(targetStep);
+      setCurrentActiveShippingDoc(doc.lastActiveShippingDoc || null);
+    }
+
+    setDocSessionId(Date.now().toString());
+    setIsNewTrade(false);
+    setTimeout(() => setCurrentPage('documents'), 0);
+  };
+
+  const handleOpenChat = (logoRect: DOMRect) => {
+    setLogoPosition({ x: logoRect.left + logoRect.width / 2, y: logoRect.top + logoRect.height / 2 });
+    setTransition('expanding');
+    setTimeout(() => { setTransition('none'); setCurrentPage('chat'); }, 500);
+  };
+
+  const handleCloseChat = (logoRect: DOMRect) => {
+    setLogoPosition({ x: logoRect.left + logoRect.width / 2, y: logoRect.top + logoRect.height / 2 });
+    setTransition('shrinking');
+    setTimeout(() => { setTransition('none'); setCurrentPage('main'); }, 500);
+  };
+
   const docTypeToStep = (docType: string): number => {
-    const mapping: Record<string, number> = {
-      'offer': 1, 'pi': 2, 'contract': 3, 'ci': 4, 'pl': 5
-    };
+    const mapping: Record<string, number> = { 'offer': 1, 'pi': 2, 'contract': 3, 'ci': 4, 'pl': 5 };
     return mapping[docType] || 1;
   };
 
-  // 백엔드에서 Trade 목록 가져오기
   const fetchTrades = useCallback(async () => {
     if (!currentUser) return;
 
     setIsLoadingTrades(true);
     try {
-      const trades = await api.getTrades(currentUser.user_id);
+      const API_URL = import.meta.env.VITE_DJANGO_API_URL || 'http://localhost:8000';
+      const response = await fetch(`${API_URL}/api/trade/dashboard/?user_id=${currentUser.user_id}`);
+      if (!response.ok) throw new Error(`Failed to fetch dashboard: ${response.statusText}`);
 
-      // Trade를 SavedDocument 형식으로 변환 (버전 정보 포함)
-      const documents: SavedDocument[] = await Promise.all(
-        trades.map(async (trade: Trade) => {
-          // Trade 상세 정보 가져오기 (documents 포함)
-          const tradeDetail = await api.getTrade(trade.trade_id);
+      const trades = await response.json();
+      const documents: SavedDocument[] = trades.map((trade: any) => {
+        const content: DocumentData = { title: trade.title };
+        const allVersions: {
+          id: string;
+          timestamp: number;
+          data: DocumentData;
+          step: number;
+          isUpload?: boolean;
+          uploadInfo?: {
+            s3_key: string;
+            s3_url: string;
+            filename: string;
+            convertedPdfUrl?: string;
+          };
+        }[] = [];
 
-          // 각 document의 versions 가져오기
-          const allVersions: { id: string; timestamp: number; data: DocumentData; step: number }[] = [];
-          const content: DocumentData = { title: trade.title };
+        trade.documents?.forEach((doc: any) => {
+          const step = docTypeToStep(doc.doc_type);
 
-          if (tradeDetail.documents) {
-            for (const doc of tradeDetail.documents) {
-              const versions = await api.getVersions(doc.doc_id);
-              const step = docTypeToStep(doc.doc_type);
+          if (doc.doc_mode) content.stepModes = { ...(content.stepModes || {}), [step]: doc.doc_mode };
 
-              // 최신 버전의 content를 저장
-              if (versions.length > 0) {
-                const latestVersion = versions[0].content as { html?: string; title?: string; stepModes?: Record<string, string> };
-                // HTML 문자열 복원
-                if (latestVersion.html) {
-                  content[step] = latestVersion.html;
-                }
-                // title 복원 (최신 버전에서)
-                if (latestVersion.title && !content.title) {
-                  content.title = latestVersion.title;
-                }
-                // stepModes 복원
-                if (latestVersion.stepModes && !content.stepModes) {
-                  content.stepModes = latestVersion.stepModes;
-                }
-              }
-
-              // 버전 히스토리 변환
-              versions.forEach(v => {
-                const vContent = v.content as { html?: string; title?: string };
-                allVersions.push({
-                  id: v.version_id.toString(),
-                  timestamp: new Date(v.created_at).getTime(),
-                  data: { [step]: vContent.html || vContent, title: vContent.title },
-                  step: step
-                });
-              });
-            }
+          if (doc.latest_version?.content) {
+            const latestContent = doc.latest_version.content;
+            if (latestContent.html) content[step] = latestContent.html;
+            else if (typeof latestContent === 'string') content[step] = latestContent;
+            if (latestContent.title && !content.title) content.title = latestContent.title;
           }
 
-          // 버전을 시간순으로 정렬 (최신순)
-          allVersions.sort((a, b) => b.timestamp - a.timestamp);
+          doc.all_versions?.forEach((version: any) => {
+            if (version.content) {
+              const vc = version.content;
+              const isUpload = vc.type === 'upload';
 
-          const completedCount = trade.completed_count || 0;
-          const totalSteps = 5;
-          const progress = Math.round((completedCount / totalSteps) * 100);
+              allVersions.push({
+                id: version.version_id.toString(),
+                timestamp: new Date(version.created_at).getTime(),
+                data: isUpload
+                  ? { [step]: null, title: vc.filename }
+                  : { [step]: vc.html || vc, title: vc.title },
+                step,
+                isUpload,
+                uploadInfo: isUpload ? {
+                  s3_key: vc.s3_key,
+                  s3_url: vc.s3_url,
+                  filename: vc.filename,
+                  convertedPdfUrl: vc.converted_pdf_url,
+                } : undefined,
+              });
+            }
+          });
+        });
 
-          return {
-            id: trade.trade_id.toString(),
-            name: trade.title,
-            date: new Date(trade.created_at).toLocaleDateString('ko-KR').replace(/\. /g, '.').slice(0, -1),
-            completedSteps: completedCount,
-            totalSteps: totalSteps,
-            progress: progress,
-            status: trade.status === 'completed' ? 'completed' : 'in-progress',
-            content: content,
-            tradeData: tradeDetail,  // documents 포함
-            versions: allVersions,
-          };
-        })
-      );
+        allVersions.sort((a, b) => b.timestamp - a.timestamp);
+        const lastStep = allVersions.length > 0 ? allVersions[0].step : 1;
+
+        let completedCount = 0;
+        const totalSteps = 5;
+        const docTypes = ['offer', 'pi', 'contract', 'ci', 'pl'];
+
+        for (let i = 0; i < totalSteps; i++) {
+          const step = i + 1;
+          const doc = trade.documents?.find((d: any) => d.doc_type === docTypes[i]);
+
+          if (doc?.doc_mode === 'skip' || (doc?.doc_mode === 'upload' && doc?.upload_status === 'ready')) {
+            completedCount++;
+            continue;
+          }
+
+          const stepContent = content[step];
+          if (stepContent && typeof stepContent === 'string' && checkStepCompletion(stepContent)) {
+            completedCount++;
+          }
+        }
+
+        const progress = Math.round((completedCount / totalSteps) * 100);
+        const status = progress === 100 ? 'completed' : 'in-progress';
+
+        return {
+          id: trade.trade_id.toString(),
+          name: trade.title,
+          date: new Date(trade.created_at).toLocaleDateString('ko-KR').replace(/\. /g, '.').slice(0, -1),
+          completedSteps: completedCount,
+          totalSteps,
+          progress,
+          status,
+          content,
+          tradeData: trade,
+          versions: allVersions,
+          lastStep,
+        };
+      });
 
       setSavedDocuments(documents);
     } catch (error) {
@@ -202,95 +320,111 @@ function App() {
     }
   }, [currentUser]);
 
-  // 로그인 후 Trade 목록 로드
   useEffect(() => {
-    if (isAuthenticated && currentUser) {
-      fetchTrades();
-    }
+    if (isAuthenticated && currentUser) fetchTrades();
   }, [isAuthenticated, currentUser, fetchTrades]);
 
-  // Track the ID of the document currently being edited
-  const [currentDocId, setCurrentDocId] = useState<string | null>(null);
+  const [currentDocId, setCurrentDocId] = useState<string | null>(sessionState.currentDocId);
   const [currentActiveShippingDoc, setCurrentActiveShippingDoc] = useState<'CI' | 'PL' | null>(null);
+  const [currentDocIds, setCurrentDocIds] = useState<Record<string, number> | null>(sessionState.currentDocIds);
 
-  // step을 doc_type으로 변환
   const stepToDocType = (step: number, shippingDoc?: 'CI' | 'PL' | null): string => {
-    if (step === 4 || step === 5) {
-      return shippingDoc === 'PL' ? 'pl' : 'ci';
-    }
-    const mapping: Record<number, string> = { 1: 'offer', 2: 'pi', 3: 'contract' };
-    return mapping[step] || 'offer';
+    if (step === 4 || step === 5) return shippingDoc === 'PL' ? 'pl' : 'ci';
+    return { 1: 'offer', 2: 'pi', 3: 'contract' }[step] || 'offer';
   };
 
-  // step에서 doc_id 가져오기
   const getDocId = useCallback((step: number, shippingDoc?: 'CI' | 'PL' | null): number | null => {
+    const docType = stepToDocType(step, shippingDoc);
+    if (currentDocIds?.[docType]) return currentDocIds[docType];
     if (!currentDocId) return null;
     const trade = savedDocuments.find(d => d.id === currentDocId);
-    if (!trade?.tradeData?.documents) return null;
+    return trade?.tradeData?.documents?.find((d: { doc_type: string }) => d.doc_type === docType)?.doc_id || null;
+  }, [currentDocId, savedDocuments, currentDocIds]);
 
-    const docType = stepToDocType(step, shippingDoc);
-    const document = trade.tradeData.documents.find((d: { doc_type: string }) => d.doc_type === docType);
-    return document?.doc_id || null;
-  }, [currentDocId, savedDocuments]);
+  const handleSaveDocument = async (data: DocumentData, step: number, activeShippingDoc?: 'CI' | 'PL' | null, isCompleted?: boolean) => {
+    if (activeShippingDoc) setCurrentActiveShippingDoc(activeShippingDoc);
 
-  const handleSaveDocument = async (data: DocumentData, step: number, activeShippingDoc?: 'CI' | 'PL' | null) => {
-    // Update currentActiveShippingDoc if provided
-    if (activeShippingDoc) {
-      setCurrentActiveShippingDoc(activeShippingDoc);
-    }
-
-    // PL 문서인 경우 versionStep은 5
-    const versionStep = activeShippingDoc === 'PL' ? 5 : step;
-
-    // Determine the document ID (trade_id) to use
     let tradeId = currentDocId;
 
-    // 백엔드 저장 로직
     try {
-      // 새 Trade 생성 (currentDocId가 없는 경우)
       if (!tradeId && currentUser) {
-        const title = data.title || 'Untitled Document';
-        const newTrade = await api.createTrade(currentUser.user_id, title);
+        const API_URL = import.meta.env.VITE_DJANGO_API_URL || 'http://localhost:8000';
+        const response = await fetch(`${API_URL}/api/trade/init/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: currentUser.emp_no, title: data.title || generateUniqueTitle('새 문서') })
+        });
+        if (!response.ok) throw new Error('Trade 생성 실패');
+
+        const newTrade = await response.json();
         tradeId = newTrade.trade_id.toString();
         setCurrentDocId(tradeId);
+        setCurrentDocIds(newTrade.doc_ids);
       }
 
-      // 현재 step에 해당하는 Document 찾기
+      const docTypeMapping: Record<number, string> = { 1: 'offer', 2: 'pi', 3: 'contract', 4: 'ci', 5: 'pl' };
+
       if (tradeId) {
         const trade = await api.getTrade(parseInt(tradeId));
-        const docType = stepToDocType(step, activeShippingDoc);
-        const document = trade.documents?.find(d => d.doc_type === docType);
 
-        // 제목이 변경되었으면 Trade 제목 업데이트
-        const newTitle = data.title || 'Untitled Document';
-        if (trade.title !== newTitle) {
-          await api.updateTrade(parseInt(tradeId), { title: newTitle });
-          console.log(`[API] Updated trade title to: ${newTitle}`);
+        let newTitle = data.title || '';
+        if (!newTitle || newTitle.startsWith('Untitled Document') || newTitle === '새 문서' || newTitle === '새 무역 거래') {
+          newTitle = generateUniqueTitle('새 문서');
+        }
+        if (trade.title !== newTitle) await api.updateTrade(parseInt(tradeId), { title: newTitle });
+
+        if (isCompleted !== undefined) {
+          const newStatus = isCompleted ? 'completed' : 'in_progress';
+          if (trade.status !== newStatus) await api.updateTrade(parseInt(tradeId), { status: newStatus });
         }
 
-        if (document) {
-          // 해당 step의 content 저장 (HTML 문자열 + 메타데이터)
-          const stepContent = data[step] || data[versionStep];
-          const versionContent = {
-            html: stepContent || '',
-            title: data.title || '',
-            stepModes: data.stepModes || {},
-            savedAt: new Date().toISOString(),
-          };
-          await api.createVersion(document.doc_id, versionContent);
-          console.log(`[API] Saved version for doc ${document.doc_id} (${docType})`, versionContent);
-        }
+        await Promise.all([1, 2, 3, 4, 5].map(async (key) => {
+          const stepMode = data.stepModes?.[key];
+          if (stepMode === 'skip' || stepMode === 'upload') return;
+
+          // 저장할 step 결정: upload/skip 모드면 다음 직접 작성 step을 저장
+          let targetStep = step;
+          const currentStepMode = data.stepModes?.[step];
+          if (currentStepMode === 'upload' || currentStepMode === 'skip') {
+            // step1 upload/skip → step2, step3 upload/skip → step4
+            if (step === 1) targetStep = 2;
+            else if (step === 3) targetStep = 4;
+          }
+
+          // targetStep에 해당하는 step만 버전 저장
+          if (targetStep <= 3) {
+            if (key !== targetStep) return;
+          } else {
+            // step 4: activeShippingDoc에 따라 CI(4) 또는 PL(5)만 저장
+            const targetKey = activeShippingDoc === 'PL' ? 5 : 4;
+            if (key !== targetKey) return;
+          }
+
+          const content = data[key];
+          if (!content) return;
+
+          const docType = docTypeMapping[key];
+          const document = trade.documents?.find(d => d.doc_type === docType);
+          if (!document) return;
+
+          const versionContent = { html: content, title: data.title || '', stepModes: data.stepModes || {}, savedAt: new Date().toISOString() };
+          const latest = document.latest_version?.content;
+          const latestHtml = typeof latest === 'string' ? latest : (latest?.html || '');
+          const latestTitle = typeof latest === 'string' ? '' : (latest?.title || '');
+
+          if (latestHtml !== content || latestTitle !== (data.title || '')) {
+            await api.createVersion(document.doc_id, versionContent);
+          }
+        }));
       }
 
-      // 저장 후 목록 새로고침 (백엔드에서 최신 데이터 가져옴)
       await fetchTrades();
-
+      setIsNewTrade(false);
     } catch (error) {
       console.error('Failed to save to backend:', error);
     }
   };
 
-  // 컴포넌트 마운트 시 localStorage에서 인증 상태 복원
   useEffect(() => {
     const savedAuth = localStorage.getItem('isAuthenticated');
     const savedEmail = localStorage.getItem('userEmail');
@@ -301,31 +435,35 @@ function App() {
       setUserEmail(savedEmail);
       if (savedUser) {
         try {
-          setCurrentUser(JSON.parse(savedUser));
-        } catch {
-          // 파싱 실패 시 무시
-        }
+          const user = JSON.parse(savedUser);
+          setCurrentUser(user);
+          if (user.user_role === 'admin') setCurrentPage('admin');
+        } catch { /* ignore */ }
       }
     }
   }, []);
+
+  useEffect(() => {
+    sessionStorage.setItem('currentPage', currentPage);
+    sessionStorage.setItem('currentStep', currentStep.toString());
+    sessionStorage.setItem('documentData', JSON.stringify(documentData));
+    currentDocId ? sessionStorage.setItem('currentDocId', currentDocId) : sessionStorage.removeItem('currentDocId');
+    currentDocIds ? sessionStorage.setItem('currentDocIds', JSON.stringify(currentDocIds)) : sessionStorage.removeItem('currentDocIds');
+  }, [currentPage, currentStep, documentData, currentDocId, currentDocIds]);
 
   const handleLogin = (employeeId: string, user?: User) => {
     setUserEmail(employeeId);
     setIsAuthenticated(true);
     if (user) {
       setCurrentUser(user);
+      setCurrentPage(user.user_role === 'admin' ? 'admin' : 'main');
     }
-
-    // localStorage에 인증 상태 저장
     localStorage.setItem('isAuthenticated', 'true');
     localStorage.setItem('userEmail', employeeId);
-    if (user) {
-      localStorage.setItem('currentUser', JSON.stringify(user));
-    }
+    if (user) localStorage.setItem('currentUser', JSON.stringify(user));
   };
 
   const handleLogout = () => {
-    // 로그아웃 처리
     setIsAuthenticated(false);
     setUserEmail('');
     setCurrentUser(null);
@@ -351,13 +489,14 @@ function App() {
       // 백엔드에서 Trade 삭제
       await api.deleteTrade(parseInt(docId));
       console.log(`[API] Deleted trade ${docId}`);
+      // 로컬 상태에서도 제거
+      setSavedDocuments(prev => prev.filter(doc => doc.id !== docId));
     } catch (error) {
       console.error('Failed to delete trade:', error);
     }
-
-    // 로컬 상태에서도 제거
-    setSavedDocuments(prev => prev.filter(doc => doc.id !== docId));
   };
+
+
 
   return (
     <div className="min-h-screen bg-gray-50 relative overflow-hidden">
@@ -372,6 +511,8 @@ function App() {
             onOpenDocument={handleOpenDocument}
             onLogoClick={handleOpenChat}
             onDeleteDocument={handleDeleteDocument}
+            isLoading={isLoadingTrades}
+            currentUser={currentUser}
           />
         </div>
       )}
@@ -420,6 +561,8 @@ function App() {
             onOpenDocument={handleOpenDocument}
             onLogoClick={handleOpenChat}
             onDeleteDocument={handleDeleteDocument}
+            isLoading={isLoadingTrades}
+            currentUser={currentUser}
           />
           {/* 글로우 효과 원 */}
           <div
@@ -450,6 +593,7 @@ function App() {
             onLogoClick={handleCloseChat}
             userEmployeeId={userEmail}
             onLogout={handleLogout}
+            currentUser={currentUser}
           />
         </div>
       )}
@@ -466,18 +610,21 @@ function App() {
           userEmployeeId={userEmail}
           onLogout={handleLogout}
           onSave={handleSaveDocument}
-          versions={currentDocId ? savedDocuments.find(d => d.id === currentDocId)?.versions : undefined}
-          onRestore={(version) => {
-            setDocumentData(prev => ({
-              ...prev,
-              [version.step]: version.data[version.step]
-            }));
-            if (currentStep !== version.step) {
-              setCurrentStep(version.step);
-            }
-          }}
+          onCreateTrade={createNewTrade}
+          onExit={handleDocumentExit}
+          versions={currentDocId ? savedDocuments.find(d => d.id === currentDocId)?.versions || [] : []}
           initialActiveShippingDoc={currentActiveShippingDoc}
           getDocId={getDocId}
+          currentUser={currentUser}
+        />
+      )}
+
+      {/* 관리자 페이지 */}
+      {currentPage === 'admin' && currentUser?.user_role === 'admin' && (
+        <AdminPage
+          onNavigate={handleNavigate}
+          currentUser={currentUser}
+          onLogout={handleLogout}
         />
       )}
 

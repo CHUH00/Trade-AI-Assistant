@@ -69,6 +69,7 @@ export default function DocumentHeader({
                 onBlur={handleTitleSave}
                 onKeyDown={handleTitleKeyDown}
                 placeholder="제목을 입력하세요. (예: USA-Fashion-20251126)"
+                maxLength={60}
                 className="text-gray-900 font-bold border-b-2 border-blue-500 outline-none focus:border-blue-600 bg-transparent w-80 py-1"
                 autoFocus
               />
@@ -91,11 +92,21 @@ export default function DocumentHeader({
         <div className="flex items-center gap-4">
           <button
             onClick={onSave}
-            className="text-gray-600 hover:text-blue-600 text-sm flex items-center gap-1 transition-colors"
-            title="전체 저장"
+            className={`text-sm flex items-center gap-1 transition-colors ${
+              isDirty
+                ? 'text-amber-600 hover:text-amber-700'
+                : 'text-gray-600 hover:text-blue-600'
+            }`}
+            title={isDirty ? "저장되지 않은 변경사항이 있습니다" : "전체 저장"}
           >
             <Save className="w-4 h-4" />
             저장
+            {isDirty && (
+              <span className="flex items-center gap-1 ml-0.5">
+                <span className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-pulse" />
+                <span className="text-xs">수정됨</span>
+              </span>
+            )}
           </button>
           <button
             onClick={onDownload}

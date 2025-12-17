@@ -21,15 +21,41 @@ if (isDev) {
 
 // ===== Types =====
 
+export interface Department {
+  dept_id: number;
+  dept_name: string;
+}
+
 export interface User {
   user_id: number;
   emp_no: string;
   name: string;
   user_role: 'user' | 'admin';
-  dept: {
-    dept_id: number;
-    dept_name: string;
-  } | null;
+  activation: boolean;
+  date_joined?: string;
+  dept: Department | null;
+}
+
+export interface UserCreateData {
+  emp_no: string;
+  name: string;
+  dept?: number | null;
+  user_role?: 'user' | 'admin';
+}
+
+export interface UserUpdateData {
+  emp_no?: string;
+  name?: string;
+  dept_id?: number | null;
+  activation?: boolean;
+  user_role?: 'user' | 'admin';
+}
+
+export interface UserSearchParams {
+  search?: string;
+  dept_id?: number;
+  activation?: boolean;
+  user_role?: 'user' | 'admin';
 }
 
 export interface LoginResponse extends User {}
@@ -127,7 +153,29 @@ class ApiClient {
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
-      const errorMessage = error.detail || error.error || `Request failed: ${response.status}`;
+      // Django REST Framework 필드별 에러 파싱
+      // 형식: { "field_name": ["error message 1", "error message 2"], ... }
+      let errorMessage = '';
+      if (error.detail) {
+        errorMessage = error.detail;
+      } else if (error.error) {
+        errorMessage = error.error;
+      } else if (typeof error === 'object' && Object.keys(error).length > 0) {
+        // 필드별 에러 메시지 추출
+        const fieldErrors: string[] = [];
+        for (const [field, messages] of Object.entries(error)) {
+          if (Array.isArray(messages)) {
+            fieldErrors.push(`${field}: ${messages.join(', ')}`);
+          } else if (typeof messages === 'string') {
+            fieldErrors.push(`${field}: ${messages}`);
+          }
+        }
+        errorMessage = fieldErrors.length > 0
+          ? fieldErrors.join('\n')
+          : `Request failed: ${response.status}`;
+      } else {
+        errorMessage = `Request failed: ${response.status}`;
+      }
       if (isDev) {
         console.error(`[API] Error: ${errorMessage}`);
       }
@@ -155,6 +203,74 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify({ emp_no, password }),
     });
+  }
+
+  async changePassword(
+    emp_no: string,
+    current_password: string,
+    new_password: string
+  ): Promise<{ message: string }> {
+    return this.request<{ message: string }>('/api/documents/auth/password-change/', {
+      method: 'POST',
+      body: JSON.stringify({ emp_no, current_password, new_password }),
+    });
+  }
+
+  async resetPassword(userId: number): Promise<{ message: string; user_id: number; emp_no: string }> {
+    return this.request<{ message: string; user_id: number; emp_no: string }>(
+      '/api/documents/auth/password-reset/',
+      {
+        method: 'POST',
+        body: JSON.stringify({ user_id: userId }),
+      }
+    );
+  }
+
+  // ===== Users =====
+
+  async getUsers(params?: UserSearchParams): Promise<User[]> {
+    const queryParams = new URLSearchParams();
+    if (params?.search) queryParams.append('search', params.search);
+    if (params?.dept_id) queryParams.append('dept_id', params.dept_id.toString());
+    if (params?.activation !== undefined) queryParams.append('activation', params.activation.toString());
+    if (params?.user_role) queryParams.append('user_role', params.user_role);
+
+    const queryString = queryParams.toString();
+    const endpoint = queryString
+      ? `/api/documents/users/?${queryString}`
+      : '/api/documents/users/';
+
+    return this.request<User[]>(endpoint);
+  }
+
+  async getUser(userId: number): Promise<User> {
+    return this.request<User>(`/api/documents/users/${userId}/`);
+  }
+
+  async createUser(data: UserCreateData): Promise<User> {
+    return this.request<User>('/api/documents/users/', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateUser(userId: number, data: UserUpdateData): Promise<User> {
+    return this.request<User>(`/api/documents/users/${userId}/`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteUser(userId: number): Promise<void> {
+    await this.request(`/api/documents/users/${userId}/`, {
+      method: 'DELETE',
+    });
+  }
+
+  // ===== Departments =====
+
+  async getDepartments(): Promise<Department[]> {
+    return this.request<Department[]>('/api/documents/departments/');
   }
 
   // ===== Trades =====
@@ -403,13 +519,19 @@ class ApiClient {
     message: string,
     onChunk: (chunk: string) => void,
     onComplete: () => void,
-    onError: (error: string) => void
+    onError: (error: string) => void,
+    userId?: string | number,
+    genChatId?: number
   ): Promise<void> {
     try {
       const response = await fetch(`${this.baseUrl}/api/chat/stream/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({
+          message,
+          user_id: userId,
+          gen_chat_id: genChatId
+        }),
       });
 
       if (!response.ok) {

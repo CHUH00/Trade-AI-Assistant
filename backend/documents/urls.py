@@ -9,6 +9,8 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (
     LoginView,
+    PasswordChangeView,
+    PasswordResetView,
     DepartmentViewSet,
     UserViewSet,
     TradeFlowViewSet,
@@ -31,22 +33,25 @@ router.register(r'messages', DocMessageViewSet, basename='message')
 urlpatterns = [
     # 인증
     path('auth/login/', LoginView.as_view(), name='login'),
+    path('auth/password-change/', PasswordChangeView.as_view(), name='password-change'),
+    path('auth/password-reset/', PasswordResetView.as_view(), name='password-reset'),
 
-    # 문서 채팅
-    path('<int:doc_id>/chat/', DocumentChatView.as_view(), name='document-chat'),
+    # ViewSet routes (먼저 배치하여 trades/, users/ 등이 먼저 매칭되도록 함)
+    path('', include(router.urls)),
+
+    # 문서 채팅 (ViewSet URL과 일관성 유지: /api/documents/documents/{id}/...)
+    path('documents/<int:doc_id>/chat/', DocumentChatView.as_view(), name='document-chat'),
 
     # 문서 처리 상태 SSE 스트림
-    path('<int:doc_id>/status/stream/', DocumentProcessingStatusView.as_view(), name='document-status-stream'),
-
-    # ViewSet routes
-    path('', include(router.urls)),
+    path('documents/<int:doc_id>/status/stream/', DocumentProcessingStatusView.as_view(), name='document-status-stream'),
 ]
 
 """
 API Endpoints:
 
 Auth:
-- POST /api/auth/login/ - 로그인
+- POST /api/documents/auth/login/ - 로그인
+- POST /api/documents/auth/password-change/ - 비밀번호 변경
 
 Departments:
 - GET /api/departments/ - 부서 목록

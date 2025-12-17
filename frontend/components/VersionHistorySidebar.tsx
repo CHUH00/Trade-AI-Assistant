@@ -1,13 +1,22 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Clock, RotateCcw, Filter, ChevronDown, Check, Calendar } from 'lucide-react';
+import { X, Clock, RotateCcw, Filter, ChevronDown, Check, Calendar, Upload, FileText } from 'lucide-react';
 import { DocumentData } from '../App';
+
+export interface UploadInfo {
+  s3_key: string;
+  s3_url: string;
+  filename: string;
+  convertedPdfUrl?: string;
+}
 
 export interface Version {
   id: string;
   timestamp: number;
   data: DocumentData;
   step: number;
+  isUpload?: boolean;
+  uploadInfo?: UploadInfo;
 }
 
 interface VersionHistorySidebarProps {
@@ -113,7 +122,7 @@ export default function VersionHistorySidebar({
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onClick={onClose}
-            className="fixed inset-0 bg-black/20 backdrop-blur-sm z-40"
+            className="fixed inset-0 bg-black/20 backdrop-blur-sm z-[60]"
           />
 
           {/* Sidebar */}
@@ -122,7 +131,7 @@ export default function VersionHistorySidebar({
             animate={{ x: 0 }}
             exit={{ x: '-100%' }}
             transition={{ type: 'spring', damping: 30, stiffness: 300 }}
-            className="fixed left-0 top-0 bottom-0 w-[400px] bg-white/80 backdrop-blur-xl shadow-2xl z-50 border-r border-white/20 flex flex-col"
+            className="fixed left-0 top-0 bottom-0 w-[400px] bg-white/80 backdrop-blur-xl shadow-2xl z-[70] border-r border-white/20 flex flex-col"
           >
             {/* Header */}
             <div className="p-6 pb-4 border-b border-gray-100/50 bg-white/50 backdrop-blur-md sticky top-0 z-30">
@@ -211,33 +220,47 @@ export default function VersionHistorySidebar({
                     <div className="absolute left-0 top-6 w-4 h-4 rounded-full border-[3px] border-white bg-gray-300 group-hover:bg-blue-500 group-hover:scale-110 transition-all shadow-sm z-10" />
 
                     <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100 hover:shadow-lg hover:border-blue-100 transition-all duration-300 group-hover:-translate-y-1">
-                      <div className="flex items-start justify-between mb-3">
-                        <div>
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 text-[10px] font-bold tracking-wider uppercase border border-blue-100">
-                              Version {versions.length - versions.indexOf(version)}
-                            </span>
-                            <span className="text-xs text-gray-400 font-medium flex items-center gap-1">
-                              <Clock className="w-3 h-3" />
-                              {formatTimeAgo(version.timestamp)}
-                            </span>
-                          </div>
-                          <h3 className="font-bold text-gray-900 text-base leading-tight">
-                            {version.data.title || '제목 없음'}
-                          </h3>
-                        </div>
+                      <div className="flex items-center gap-2 mb-3">
+                        <span className="px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 text-[10px] font-bold tracking-wider uppercase border border-blue-100">
+                          Version {versions.length - versions.indexOf(version)}
+                        </span>
+                        <span className="text-xs text-gray-400 font-medium flex items-center gap-1">
+                          <Clock className="w-3 h-3" />
+                          {formatTimeAgo(version.timestamp)}
+                        </span>
                       </div>
 
-                      <div className="mb-4 p-3 bg-gray-50 rounded-xl border border-gray-100 group-hover:bg-blue-50/30 group-hover:border-blue-100/50 transition-colors">
+                      <div className={`mb-4 p-3 rounded-xl border transition-colors ${
+                        version.isUpload
+                          ? 'bg-amber-50 border-amber-200 group-hover:bg-amber-100/50'
+                          : 'bg-gray-50 border-gray-100 group-hover:bg-blue-50/30 group-hover:border-blue-100/50'
+                      }`}>
                         <div className="flex items-center gap-2 mb-1">
-                          <div className="w-1.5 h-1.5 rounded-full bg-blue-400" />
-                          <p className="text-sm font-semibold text-gray-700">
-                            {getTemplateName(version.step)}
-                          </p>
+                          {version.isUpload ? (
+                            <>
+                              <Upload className="w-4 h-4 text-amber-600" />
+                              <p className="text-sm font-semibold text-amber-700">
+                                업로드된 문서
+                              </p>
+                            </>
+                          ) : (
+                            <>
+                              <FileText className="w-4 h-4 text-blue-500" />
+                              <p className="text-sm font-semibold text-gray-700">
+                                {getTemplateName(version.step)}
+                              </p>
+                            </>
+                          )}
                         </div>
-                        <p className="text-xs text-gray-500 pl-3.5 flex items-center gap-1">
-                          <Calendar className="w-3 h-3" />
-                          {formatActualDate(version.timestamp)}
+                        <p className="text-xs text-gray-500 pl-6 flex items-center gap-1">
+                          {version.isUpload ? (
+                            <span className="truncate max-w-[200px]">{version.uploadInfo?.filename}</span>
+                          ) : (
+                            <>
+                              <Calendar className="w-3 h-3" />
+                              {formatActualDate(version.timestamp)}
+                            </>
+                          )}
                         </p>
                       </div>
 

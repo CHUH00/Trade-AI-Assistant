@@ -46,6 +46,32 @@ from agent_core.s3_utils import s3_manager
 logger = logging.getLogger(__name__)
 
 
+def get_user_by_id_or_emp_no(user_id):
+    """
+    user_id(숫자) 또는 emp_no(사원번호)로 사용자 조회
+
+    프론트엔드에서 emp_no(사원번호)를 user_id로 전달할 수 있으므로,
+    먼저 emp_no로 조회하고, 없으면 user_id(정수)로 조회합니다.
+    """
+    if user_id is None:
+        return None
+    try:
+        # 먼저 emp_no로 조회 시도 (사원번호가 숫자로만 되어 있어도 emp_no로 먼저 찾기)
+        try:
+            return User.objects.get(emp_no=str(user_id))
+        except User.DoesNotExist:
+            pass
+
+        # emp_no로 못 찾으면 user_id(정수)로 조회
+        if isinstance(user_id, int) or (isinstance(user_id, str) and user_id.isdigit()):
+            return User.objects.get(user_id=int(user_id))
+
+        return None
+    except User.DoesNotExist:
+        logger.warning(f"User not found: user_id={user_id}")
+        return None
+
+
 # =============================================================================
 # Auth Views
 # =============================================================================
@@ -85,6 +111,97 @@ class LoginView(APIView):
         return Response(response_data)
 
 
+class PasswordChangeView(APIView):
+    """비밀번호 변경 API"""
+
+    def post(self, request):
+        emp_no = request.data.get('emp_no')
+        current_password = request.data.get('current_password')
+        new_password = request.data.get('new_password')
+
+        # 필수 필드 검증
+        if not emp_no or not current_password or not new_password:
+            return Response(
+                {'error': '사원번호, 현재 비밀번호, 새 비밀번호는 필수입니다.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # 비밀번호 유효성 검사 (8~16자, 영문/숫자/특수문자 조합)
+        import re
+        if len(new_password) < 8 or len(new_password) > 16:
+            return Response(
+                {'error': '비밀번호는 8~16자 사이여야 합니다.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        has_letter = bool(re.search(r'[A-Za-z]', new_password))
+        has_number = bool(re.search(r'[0-9]', new_password))
+        has_special = bool(re.search(r'[!@#$%^&*()_+\-=\[\]{};\':"\\|,.<>\/?`~]', new_password))
+
+        if not (has_letter and has_number and has_special):
+            return Response(
+                {'error': '비밀번호는 영문, 숫자, 특수문자를 각각 1개 이상 포함해야 합니다.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # 현재 비밀번호로 인증
+        user = authenticate(request, username=emp_no, password=current_password)
+
+        if user is None:
+            return Response(
+                {'error': '현재 비밀번호가 올바르지 않습니다.'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+
+        if not user.activation:
+            return Response(
+                {'error': '비활성화된 계정입니다.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # 비밀번호 변경
+        user.set_password(new_password)
+        user.save()
+
+        logger.info(f"Password changed for user: {emp_no}")
+
+        return Response({'message': '비밀번호가 성공적으로 변경되었습니다.'})
+
+
+class PasswordResetView(APIView):
+    """관리자용 비밀번호 초기화 API"""
+
+    def post(self, request):
+        user_id = request.data.get('user_id')
+
+        # 필수 필드 검증
+        if not user_id:
+            return Response(
+                {'error': 'user_id는 필수입니다.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            user = User.objects.get(user_id=user_id)
+        except User.DoesNotExist:
+            return Response(
+                {'error': '사용자를 찾을 수 없습니다.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        # 비밀번호를 "a123456!"로 초기화
+        user.set_password('a123456!')
+        user.save()
+
+        logger.info(f"Password reset for user: {user.emp_no} (user_id: {user_id})")
+
+        return Response({
+            'message': '비밀번호가 초기화되었습니다.',
+            'user_id': user.user_id,
+            'emp_no': user.emp_no
+        })
+
+
 # =============================================================================
 # Department Views
 # =============================================================================
@@ -109,6 +226,37 @@ class UserViewSet(viewsets.ModelViewSet):
         if self.action == 'create':
             return UserCreateSerializer
         return UserSerializer
+
+    def get_queryset(self):
+        """검색 및 필터링"""
+        from django.db.models import Q
+
+        queryset = super().get_queryset()
+
+        # 검색어 (이름 또는 사원번호)
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search) | Q(emp_no__icontains=search)
+            )
+
+        # 부서 필터
+        dept_id = self.request.query_params.get('dept_id')
+        if dept_id:
+            queryset = queryset.filter(dept_id=dept_id)
+
+        # 활성 상태 필터
+        activation = self.request.query_params.get('activation')
+        if activation is not None and activation != '':
+            queryset = queryset.filter(activation=activation.lower() == 'true')
+
+        # 역할 필터
+        user_role = self.request.query_params.get('user_role')
+        if user_role:
+            queryset = queryset.filter(user_role=user_role)
+
+        # 기본 정렬: 사원번호 오름차순
+        return queryset.order_by('emp_no')
 
 
 # =============================================================================
@@ -188,6 +336,15 @@ class TradeFlowViewSet(viewsets.ModelViewSet):
 
         return Response(TradeFlowDetailSerializer(trade_flow).data)
 
+    def destroy(self, request, *args, **kwargs):
+        """Trade 삭제 (S3, Qdrant, Mem0, RDS 포함)"""
+        from .services import delete_trade_with_resources
+
+        trade_flow = self.get_object()
+        delete_trade_with_resources(trade_flow)
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
 
 # =============================================================================
 # Document Views
@@ -225,11 +382,22 @@ class DocumentViewSet(viewsets.ModelViewSet):
         file_size = data['file_size']
         mime_type = data['mime_type']
 
+        # 계층적 S3 경로를 위한 정보 추출
+        trade = document.trade
+        emp_no = trade.user.emp_no
+        trade_id = trade.trade_id
+        doc_type = document.doc_type
+
+        # 참고: 이전 S3 파일은 삭제하지 않음
+        # DocVersion에 참조가 남아있어 버전 복원 시 필요함
+
         try:
             presigned_data = s3_manager.generate_presigned_upload_url(
                 file_name=filename,
                 file_type=mime_type,
-                expiration=3600
+                emp_no=emp_no,
+                trade_id=trade_id,
+                doc_type=doc_type
             )
 
             # Document 업데이트
@@ -284,7 +452,14 @@ class DocumentViewSet(viewsets.ModelViewSet):
 
         # PDF 처리 시작
         from documents.services import process_uploaded_document
-        process_uploaded_document(document.doc_id)
+        try:
+            process_uploaded_document(document.doc_id)
+        except Exception as e:
+            logger.error(f"Error processing document {document.doc_id}: {e}")
+            return Response({
+                'error': f'Document processing failed: {str(e)}',
+                'doc_id': document.doc_id
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         return Response({
             'status': 'processing',
@@ -418,13 +593,13 @@ class DocMessageViewSet(viewsets.ModelViewSet):
 # 툴 이름 → 표시 정보 매핑
 TOOL_DISPLAY_INFO = {
     'search_user_document': {
-        'name': '문서 검색',
-        'icon': 'document',
-        'description': '현재 문서에서 관련 내용을 검색했습니다.'
+        'name': '업로드 문서 검색',
+        'icon': 'file-search',
+        'description': '업로드한 문서에서 관련 내용을 검색했습니다.'
     },
     'search_trade_documents': {
         'name': '무역 지식 검색',
-        'icon': 'database',
+        'icon': 'document',
         'description': '무역 문서 데이터베이스에서 관련 정보를 검색했습니다.'
     },
     'search_web': {
@@ -437,11 +612,12 @@ TOOL_DISPLAY_INFO = {
 
 class DocumentChatView(APIView):
     """
-    문서 기반 채팅 API
+    문서 기반 채팅 API (Mem0 메모리 통합)
 
     POST /api/documents/{doc_id}/chat/
     {
-        "message": "이 계약서의 가격은?"
+        "message": "이 계약서의 가격은?",
+        "user_id": 1  # 선택: 메모리 기능에 사용
     }
     """
 
@@ -450,14 +626,17 @@ class DocumentChatView(APIView):
         from agents.items import ToolCallItem
         from agent_core import get_read_document_agent
         from chat.config import PROMPT_VERSION, PROMPT_LABEL
+        from chat.memory_service import get_memory_service
 
         serializer = ChatRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         message = serializer.validated_data['message']
+        user_id = request.data.get('user_id')  # 메모리용 user_id
 
         try:
             document = Document.objects.get(doc_id=doc_id)
+            trade_id = document.trade_id
 
             if document.doc_mode == 'upload' and document.upload_status != 'ready':
                 return Response(
@@ -472,6 +651,25 @@ class DocumentChatView(APIView):
                 content=message
             )
 
+            # Mem0 컨텍스트 로드
+            mem_service = get_memory_service()
+            context = {}
+            numeric_user_id = None
+
+            if user_id:
+                # get_user_by_id_or_emp_no 함수로 사용자 조회 (emp_no 우선)
+                user_obj = get_user_by_id_or_emp_no(user_id)
+                if user_obj:
+                    numeric_user_id = user_obj.user_id
+                    logger.info(f"User found: emp_no/user_id={user_id} -> user_id={numeric_user_id}")
+
+            if numeric_user_id and mem_service:
+                context = mem_service.build_doc_context(
+                    doc_id=doc_id,
+                    user_id=numeric_user_id,
+                    query=message
+                )
+
             # Agent 생성 및 실행
             agent = get_read_document_agent(
                 document_id=document.doc_id,
@@ -481,7 +679,12 @@ class DocumentChatView(APIView):
                 prompt_label=PROMPT_LABEL
             )
 
-            result = asyncio.run(Runner.run(agent, input=message))
+            # 컨텍스트 추가
+            enhanced_input = message
+            if context.get('context_summary'):
+                enhanced_input = f"[{context['context_summary']}]\n\n{message}"
+
+            result = asyncio.run(Runner.run(agent, input=enhanced_input))
 
             # 사용된 툴 추출
             tools_used = []
@@ -509,9 +712,29 @@ class DocumentChatView(APIView):
                 metadata={'tools_used': [tool['id'] for tool in tools_used]}
             )
 
+            # Mem0에 대화 메모리 추가
+            if numeric_user_id:
+                try:
+                    mem_service.add_doc_memory(
+                        doc_id=doc_id,
+                        user_id=numeric_user_id,
+                        messages=[
+                            {"role": "user", "content": message},
+                            {"role": "assistant", "content": result.final_output}
+                        ],
+                        metadata={
+                            "trade_id": trade_id,
+                            "doc_type": document.doc_type
+                        }
+                    )
+                    logger.info(f"Mem0 메모리 추가: doc_id={doc_id}, user_id={numeric_user_id}")
+                except Exception as mem_error:
+                    logger.error(f"Mem0 메모리 추가 실패: {mem_error}")
+
             return Response({
                 'message': result.final_output,
-                'tools_used': tools_used
+                'tools_used': tools_used,
+                'context_used': context.get('context_summary', '')
             })
 
         except Document.DoesNotExist:
@@ -521,6 +744,8 @@ class DocumentChatView(APIView):
             )
         except Exception as e:
             logger.error(f"Document chat error: {e}")
+            import traceback
+            traceback.print_exc()
             return Response(
                 {'error': f'채팅 처리 중 오류가 발생했습니다: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -582,11 +807,33 @@ class DocumentProcessingStatusView(View):
                     document.s3_url = new_url
                     document.save()
 
-                    status_data['message'] = '처리 완료!'
+                    status_data['type'] = 'complete'
+                    status_data['message'] = '문서 처리 완료'
                     status_data['progress'] = 100
                     status_data['s3_url'] = new_url
                     status_data['total_chunks'] = len(document.qdrant_point_ids)
-                    yield f"data: {json.dumps({'type': 'complete', **status_data})}\n\n"
+                    
+                    # 변환된 PDF URL 추가
+                    if document.converted_pdf_key:
+                        converted_pdf_url = s3_manager.generate_presigned_download_url(
+                            s3_key=document.converted_pdf_key,
+                            expiration=3600 * 24
+                        )
+                        document.converted_pdf_url = converted_pdf_url
+                        document.save(update_fields=['converted_pdf_url'])
+                        status_data['converted_pdf_url'] = converted_pdf_url
+                    
+                    # 템플릿 데이터 추가 (템플릿 문서인 경우)
+                    if document.template_data:
+                        try:
+                            import json
+                            template_data = json.loads(document.template_data)
+                            status_data['template_data'] = template_data
+                            logger.info(f"Sending template_data to frontend: {template_data.get('template_type')} with {template_data.get('row_count', 0)} rows")
+                        except json.JSONDecodeError as e:
+                            logger.error(f"Failed to parse template_data: {e}")
+
+                    yield f"data: {json.dumps(status_data)}\n\n"
                     return
 
                 elif document.upload_status == 'error':

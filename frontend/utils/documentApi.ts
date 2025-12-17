@@ -29,8 +29,16 @@ export interface DocumentStatus {
   message: string;
   progress: number;
   s3_url?: string;
+  converted_pdf_url?: string;
   total_chunks?: number;
   error?: string;
+  template_data?: {
+    is_template: boolean;
+    template_type: string;
+    fields: Record<string, string>;
+    table_rows: Array<Record<string, string>>;
+    row_count: number;
+  };
 }
 
 export interface StatusStreamCallbacks {
@@ -54,8 +62,7 @@ export async function requestPresignedUrl(data: PresignedUrlRequest): Promise<Pr
   });
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.detail || error.error || 'Presigned URL 요청 실패');
+    throw new Error('upload_request_failed');
   }
 
   return response.json();
@@ -74,7 +81,7 @@ export async function uploadToS3(uploadUrl: string, file: File): Promise<void> {
   });
 
   if (!response.ok) {
-    throw new Error(`S3 업로드 실패: ${response.status}`);
+    throw new Error('s3_upload_failed');
   }
 }
 
@@ -89,8 +96,7 @@ export async function notifyUploadComplete(documentId: number, s3Key: string): P
   });
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.detail || error.error || '업로드 완료 알림 실패');
+    throw new Error('upload_complete_failed');
   }
 }
 
@@ -226,6 +232,6 @@ export async function uploadDocumentFlow(
 
   } catch (error) {
     callbacks.onError(error instanceof Error ? error.message : '업로드 실패');
-    return () => {}; // 빈 함수 반환
+    return () => { }; // 빈 함수 반환
   }
 }

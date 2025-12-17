@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect, RefObject } from 'react';
-import { Sparkles, Send, X, Wand2, Eye, Undo2, Check, XCircle, Globe, Database, Wrench } from 'lucide-react';
+import React, { useState, useRef, useEffect, useMemo, RefObject } from 'react';
+import { Sparkles, Send, X, Wand2, Eye, Undo2, Check, XCircle, Globe, Database, Wrench, FileSearch } from 'lucide-react';
 import { ContractEditorRef } from './editor/ContractEditor';
 import ReactMarkdown from 'react-markdown';
 
@@ -18,9 +18,25 @@ const getToolIcon = (iconName: string) => {
       return Globe;
     case 'document':
       return Database;
+    case 'file-search':
+      return FileSearch;
     default:
       return Wrench;
   }
+};
+
+// 툴 상태 표시 정보 매핑
+const TOOL_STATUS_MAP: Record<string, { label: string; color: string; dotColor: string }> = {
+  '질문 분석': { label: '질문 분석중', color: 'text-gray-500', dotColor: 'bg-gray-400' },
+  '답변 생성': { label: '답변 생성중', color: 'text-blue-600', dotColor: 'bg-blue-500' },
+  '무역 지식 검색': { label: '무역 지식 검색중', color: 'text-blue-600', dotColor: 'bg-blue-500' },
+  '업로드 문서 검색': { label: '업로드 문서 검색중', color: 'text-emerald-600', dotColor: 'bg-emerald-500' },
+  '웹 검색': { label: '웹 검색중', color: 'text-violet-600', dotColor: 'bg-violet-500' },
+};
+
+const getToolStatusInfo = (toolName: string | null) => {
+  if (!toolName) return { label: '준비중', color: 'text-gray-500', dotColor: 'bg-gray-400' };
+  return TOOL_STATUS_MAP[toolName] || { label: `${toolName}중`, color: 'text-gray-500', dotColor: 'bg-blue-500' };
 };
 
 interface Change {
@@ -46,15 +62,26 @@ interface PreviewState {
   messageId?: string;  // 적용 완료 상태 추적용
 }
 
+// 이전 문서 정보 타입
+interface PrevDocument {
+  type: 'manual' | 'upload' | 'skip';
+  content: string;  // manual: HTML, upload: extracted text 또는 URL
+}
+
 interface ChatAssistantProps {
   currentStep: number;
   onClose?: () => void;
   editorRef: RefObject<ContractEditorRef>;
   onApply: (changes: Change[], step: number) => void;  // Now takes changes array instead of full HTML
-  documentId?: number | null; // Optional document ID for document-specific chat
+  documentId?: number | null; // Optional document ID for document-specific chat (업로드 시 사용)
+  userEmployeeId?: string; // 사용자 사원번호 (세션 관리용)
+  getDocId?: (step: number, shippingDoc?: 'CI' | 'PL' | null) => number | null; // step에서 doc_id 가져오기 함수
+  activeShippingDoc?: 'CI' | 'PL' | null; // 현재 활성화된 선적서류 타입 (Step 4에서 CI/PL 구분용)
+  documentData?: Record<string | number, string | undefined>; // 모든 step의 문서 내용 (이전 문서 참조용)
+  stepModes?: Record<number, 'manual' | 'upload' | 'skip' | null>; // 각 step의 작성 모드
 }
 
-export default function ChatAssistant({ currentStep, onClose, editorRef, onApply, documentId }: ChatAssistantProps) {
+export default function ChatAssistant({ currentStep, onClose, editorRef, onApply, documentId, userEmployeeId, getDocId, activeShippingDoc, documentData, stepModes }: ChatAssistantProps) {
   const [messages, setMessages] = useState<Message[]>([
     {
       id: '1',
@@ -70,11 +97,109 @@ export default function ChatAssistant({ currentStep, onClose, editorRef, onApply
   });
   const [history, setHistory] = useState<string[]>([]);
   const [isConnected, setIsConnected] = useState(true);
+  const [currentToolStatus, setCurrentToolStatus] = useState<string | null>(null);  // 현재 진행 중인 tool 상태
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // 현재 step에 해당하는 doc_id 가져오기 (getDocId 함수 사용)
+  const currentDocId = useMemo(() => {
+    // documentId가 직접 전달된 경우 (업로드된 문서) 우선 사용
+    if (documentId) return documentId;
+    // getDocId 함수를 통해 현재 step의 doc_id 조회
+    if (getDocId) {
+      // Step 4에서는 activeShippingDoc 사용 (CI 또는 PL)
+      // activeShippingDoc이 전달되면 그 값을 사용, 없으면 기본값 사용
+      const shippingDoc = currentStep === 4 ? (activeShippingDoc || 'CI') : null;
+      return getDocId(currentStep <= 3 ? currentStep : 4, shippingDoc);
+    }
+    return null;
+  }, [documentId, getDocId, currentStep, activeShippingDoc]);
+
+  // 이전 doc_id 추적 (변경 감지용)
+  const prevDocIdRef = useRef<number | null>(null);
 
   const OPENAI_API_KEY = import.meta.env.VITE_OPENAI_API_KEY;
   const USE_DJANGO = import.meta.env.VITE_USE_DJANGO === 'true';
   const DJANGO_API_URL = import.meta.env.VITE_DJANGO_API_URL || 'http://localhost:8000';
+
+  // 채팅 초기화 함수
+  const resetChat = () => {
+    setMessages([
+      {
+        id: '1',
+        type: 'ai',
+        content: '안녕하세요! 문서 작성을 도와드리겠습니다. 문서 수정을 원하시면 "~로 수정해줘"라고 말씀해주세요.'
+      }
+    ]);
+  };
+
+  // 대화 히스토리 로드 함수 (doc_id 기반)
+  const loadChatHistory = async (docId: number) => {
+    if (!USE_DJANGO || !docId) {
+      resetChat();
+      return;
+    }
+
+    try {
+      const response = await fetch(`${DJANGO_API_URL}/api/documents/${docId}/chat/history/`);
+      if (!response.ok) {
+        resetChat();
+        return;
+      }
+
+      const data = await response.json();
+
+      if (data.messages && data.messages.length > 0) {
+        // role 매핑: 백엔드에서는 'user'/'agent'로 저장됨
+        // metadata에서 changes, is_edit, isApplied 정보 복원
+        const loadedMessages: Message[] = data.messages.map((msg: {
+          role: string;
+          content: string;
+          doc_message_id?: number;
+          metadata?: {
+            is_edit?: boolean;
+            changes?: Change[];
+            edit_message?: string;
+            tools_used?: ToolUsed[];
+            isApplied?: boolean;
+          };
+        }, index: number) => {
+          const isAI = msg.role !== 'user';
+          const metadata = msg.metadata || {};
+          const hasChanges = isAI && metadata.is_edit && metadata.changes && metadata.changes.length > 0;
+
+          return {
+            id: `loaded_${msg.doc_message_id || index}_${Date.now()}`,
+            type: isAI ? 'ai' : 'user',
+            content: hasChanges && metadata.edit_message ? metadata.edit_message : msg.content,
+            step: currentStep,
+            // AI 편집 메시지인 경우 버튼 상태 복원
+            hasApply: hasChanges,
+            changes: hasChanges ? metadata.changes : undefined,
+            toolsUsed: isAI ? metadata.tools_used : undefined,
+            // 편집 메시지는 기본적으로 적용 완료 상태로 표시 (재적용 방지)
+            isApplied: hasChanges ? (metadata.isApplied !== false) : undefined
+          };
+        });
+
+        setMessages([
+          {
+            id: '1',
+            type: 'ai',
+            content: '안녕하세요! 문서 작성을 도와드리겠습니다. 문서 수정을 원하시면 "~로 수정해줘"라고 말씀해주세요.'
+          },
+          ...loadedMessages
+        ]);
+        console.log(`[ChatAssistant] 대화 히스토리 로드 완료: ${loadedMessages.length}개 메시지 (편집 메시지 포함)`);
+      } else {
+        // 히스토리가 없으면 새 채팅으로 시작
+        resetChat();
+      }
+    } catch (error) {
+      console.error('대화 히스토리 로드 실패:', error);
+      resetChat();
+    }
+  };
 
   // OpenAI API 직접 호출 (테스트용)
   const callOpenAI = async (userMessage: string, documentContent: string): Promise<{
@@ -196,9 +321,70 @@ ${documentContent}
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
+  // textarea 자동 높이 조절 (사이드바 높이의 1/3까지)
+  const adjustTextareaHeight = () => {
+    const textarea = textareaRef.current;
+    if (textarea) {
+      // 사이드바(부모 컨테이너) 높이의 1/3을 최대 높이로 설정
+      const container = textarea.closest('.h-full') as HTMLElement;
+      const maxHeight = container ? container.clientHeight / 3 : 200;
+
+      textarea.style.height = 'auto';
+      const newHeight = Math.min(textarea.scrollHeight, maxHeight);
+      textarea.style.height = `${newHeight}px`;
+    }
+  };
+
+  // textarea 높이 리셋
+  const resetTextareaHeight = () => {
+    const textarea = textareaRef.current;
+    if (textarea) {
+      textarea.style.height = 'auto';
+    }
+  };
+
+  // 사이드바 너비 변경 시 textarea 높이 재조절
+  useEffect(() => {
+    const handleResize = () => {
+      if (input.trim()) {
+        adjustTextareaHeight();
+      }
+    };
+
+    // ResizeObserver로 부모 컨테이너 크기 변화 감지
+    const container = textareaRef.current?.closest('.h-full');
+    if (container) {
+      const resizeObserver = new ResizeObserver(handleResize);
+      resizeObserver.observe(container);
+      return () => resizeObserver.disconnect();
+    }
+  }, [input]);
+
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // currentDocId 변경 감지: 문서가 바뀌면 새 채팅 시작
+  // Step 4에서 CI↔PL 전환 시에도 currentDocId가 변경되어 채팅이 리프레시됨
+  useEffect(() => {
+    if (prevDocIdRef.current === currentDocId) return;
+    prevDocIdRef.current = currentDocId;
+
+    if (currentDocId) {
+      console.log(`[ChatAssistant] 채팅 리로드: docId=${currentDocId}`);
+      loadChatHistory(currentDocId);
+    } else {
+      resetChat();
+    }
+  }, [currentDocId]);
+
+  // 컴포넌트 마운트 시 현재 step의 대화 히스토리 로드
+  useEffect(() => {
+    if (currentDocId) {
+      loadChatHistory(currentDocId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 연결 상태 체크
   useEffect(() => {
@@ -250,14 +436,17 @@ ${documentContent}
     e.preventDefault();
     if (!input.trim() || isLoading) return;
 
-    // Capture the step when the request is made
-    const requestStep = currentStep;
+    // Step 4에서는 activeShippingDoc으로 실제 docKey 결정
+    // CI=4, PL=5 (Step 1~3은 step과 docKey가 동일)
+    const requestDocKey = currentStep <= 3
+      ? currentStep
+      : (activeShippingDoc === 'PL' ? 5 : 4);
 
     const userMessage: Message = {
       id: Date.now().toString(),
       type: 'user',
       content: input,
-      step: requestStep
+      step: requestDocKey
     };
 
     const aiMessageId = (Date.now() + 1).toString();
@@ -265,61 +454,101 @@ ${documentContent}
     setMessages(prev => [...prev, userMessage]);
     const currentInput = input;
     setInput('');
+    resetTextareaHeight();
     setIsLoading(true);
 
     const documentContent = editorRef.current?.getContent() || '';
 
-    // Django 스트리밍 사용 여부
-    if (USE_DJANGO) {
-      // Document-specific chat (non-streaming JSON response)
-      if (documentId) {
-        try {
-          const response = await fetch(`${DJANGO_API_URL}/api/documents/${documentId}/chat/`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              message: currentInput
-            })
-          });
+    // 이전 step 문서 내용 구성 (저장 여부와 무관하게 실시간 데이터 전달)
+    const buildPrevDocuments = (): Record<string, PrevDocument> => {
+      const docTypeMap: Record<number, string> = {
+        1: 'offer',
+        2: 'pi',
+        3: 'contract',
+        4: 'ci',
+        5: 'pl'
+      };
 
-          if (!response.ok) {
-            throw new Error(`API 오류: ${response.status}`);
+      const prevDocs: Record<string, PrevDocument> = {};
+
+      if (documentData && stepModes) {
+        // 현재 step 이전의 모든 문서 수집
+        for (let step = 1; step <= 5; step++) {
+          // 현재 step은 제외 (document_content로 이미 전달)
+          if (step === currentStep) continue;
+          // Step 4에서 activeShippingDoc에 따라 CI(4) 또는 PL(5) 중 하나만 현재 step
+          if (currentStep === 4 && activeShippingDoc === 'CI' && step === 4) continue;
+          if (currentStep === 4 && activeShippingDoc === 'PL' && step === 5) continue;
+
+          const docType = docTypeMap[step];
+          const mode = stepModes[step];
+          const content = documentData[step];
+
+          // mode가 있으면 prevDocs에 추가
+          // - manual/skip: content가 있어야 추가
+          // - upload: content 없어도 추가 (백엔드에서 DB의 extracted_text 조회)
+          if (mode) {
+            if (mode === 'upload') {
+              // 업로드 문서: content 없어도 mode 정보 전달 → 백엔드에서 extracted_text 조회
+              prevDocs[docType] = {
+                type: mode,
+                content: content && typeof content === 'string' ? content : ''
+              };
+            } else if (content && typeof content === 'string' && content.trim()) {
+              // 직접작성/skip 문서: content가 있을 때만 추가
+              prevDocs[docType] = {
+                type: mode,
+                content: content
+              };
+            }
           }
-
-          const data = await response.json();
-
-          // AI 메시지 추가
-          setMessages(prev => [...prev, {
-            id: aiMessageId,
-            type: 'ai',
-            content: data.message || '',
-            step: requestStep,
-            toolsUsed: data.tools_used || []
-          }]);
-
-        } catch (error) {
-          console.error('Document chat API 오류:', error);
-          const errorContent = `오류가 발생했습니다: ${error instanceof Error ? error.message : '알 수 없는 오류'}`;
-
-          setMessages(prev => [...prev, {
-            id: aiMessageId,
-            type: 'ai' as const,
-            content: errorContent,
-            step: requestStep
-          }]);
         }
       }
-      // General document editing chat (streaming)
-      else {
-        try {
-          const response = await fetch(`${DJANGO_API_URL}/api/chat/stream/`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              message: currentInput,
-              document: documentContent
-            })
-          });
+
+      return prevDocs;
+    };
+
+    const prevDocuments = buildPrevDocuments();
+
+    // Django 스트리밍 사용 여부
+    if (USE_DJANGO) {
+      // doc_id 기반 채팅 (currentDocId 사용 - 이미 documentId 또는 getDocId 결과가 반영됨)
+      const effectiveDocId = currentDocId;
+
+      // 디버깅 로그
+      console.log('🔍 Chat API 호출 정보:', {
+        documentId,
+        currentDocId,
+        effectiveDocId,
+        currentStep,
+        userEmployeeId,
+        prevDocuments: Object.keys(prevDocuments)
+      });
+
+      if (!effectiveDocId) {
+        // doc_id가 없으면 오류 표시
+        setMessages(prev => [...prev, {
+          id: aiMessageId,
+          type: 'ai' as const,
+          content: '문서 ID가 없습니다. 페이지를 새로고침하거나 문서를 다시 생성해주세요.',
+          step: requestDocKey
+        }]);
+        setIsLoading(false);
+        return;
+      }
+
+      try {
+        const response = await fetch(`${DJANGO_API_URL}/api/documents/chat/stream/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            doc_id: effectiveDocId,
+            message: currentInput,
+            user_id: userEmployeeId,
+            document_content: documentContent,  // 현재 작성 중인 문서 내용 전달
+            prev_documents: prevDocuments  // 이전 step 문서 내용 전달
+          })
+        });
 
         if (!response.ok) {
           throw new Error(`API 오류: ${response.status}`);
@@ -337,9 +566,10 @@ ${documentContent}
           id: aiMessageId,
           type: 'ai',
           content: '',
-          step: requestStep,
+          step: requestDocKey,
           toolsUsed: []
         }]);
+        setCurrentToolStatus('질문 분석');  // 스트리밍 시작 시 질문 분석 상태
 
         let accumulatedContent = '';
         let accumulatedTools: ToolUsed[] = [];
@@ -356,8 +586,28 @@ ${documentContent}
               try {
                 const data = JSON.parse(line.slice(6));
 
-                if (data.type === 'text') {
+                if (data.type === 'init') {
+                  // doc_id, trade_id 초기화 정보
+                  console.log('📋 Chat Session 초기화:', {
+                    doc_id: data.doc_id,
+                    trade_id: data.trade_id
+                  });
+                } else if (data.type === 'agent_info') {
+                  // 에이전트 정보 콘솔 출력
+                  const modeEmoji = data.agent.doc_mode === 'upload' ? '📄' : '✏️';
+                  const modeText = data.agent.doc_mode === 'upload' ? '업로드 모드' : '작성 모드';
+                  console.log('%c🤖 Agent 정보', 'color: #6366f1; font-weight: bold; font-size: 14px;');
+                  console.log(`%c   ${modeEmoji} Mode: ${modeText} (${data.agent.doc_mode})`, 'color: #8b5cf6; font-weight: bold;');
+                  console.log('%c   Name: ' + data.agent.name, 'color: #22c55e; font-weight: bold;');
+                  console.log('%c   Model: ' + data.agent.model, 'color: #3b82f6;');
+                  console.log('%c   Tools: ' + data.agent.tools.join(', '), 'color: #f59e0b;');
+                  console.log('-----------------------------------');
+                } else if (data.type === 'context') {
+                  // 컨텍스트 정보 수신 (Mem0 메모리)
+                  console.log('🧠 Mem0 컨텍스트:', data.summary);
+                } else if (data.type === 'text') {
                   accumulatedContent += data.content;
+                  setCurrentToolStatus('답변 생성');  // 텍스트 스트리밍 시작 시 답변 생성 상태
                   setMessages(prev => prev.map(msg =>
                     msg.id === aiMessageId
                       ? { ...msg, content: accumulatedContent }
@@ -365,6 +615,7 @@ ${documentContent}
                   ));
                 } else if (data.type === 'tool') {
                   accumulatedTools = [...accumulatedTools, data.tool];
+                  setCurrentToolStatus(data.tool.name);  // tool 상태 업데이트
                   setMessages(prev => prev.map(msg =>
                     msg.id === aiMessageId
                       ? { ...msg, toolsUsed: accumulatedTools }
@@ -372,17 +623,20 @@ ${documentContent}
                   ));
                 } else if (data.type === 'edit') {
                   // 문서 수정 응답 처리 (fieldId/value format)
+                  console.log('[ChatAssistant] 편집 응답 수신:', data);
                   setMessages(prev => prev.map(msg =>
                     msg.id === aiMessageId
                       ? {
                           ...msg,
                           content: data.message || '문서를 수정했습니다.',
                           hasApply: true,
-                          changes: data.changes || []
+                          changes: data.changes || [],
+                          step: requestDocKey  // step 정보 추가
                         }
                       : msg
                   ));
                 } else if (data.type === 'done') {
+                  setCurrentToolStatus(null);  // tool 상태 초기화
                   // 스트리밍 완료 시 최종 도구 정보 업데이트
                   if (data.tools_used && data.tools_used.length > 0) {
                     setMessages(prev => prev.map(msg =>
@@ -421,11 +675,10 @@ ${documentContent}
               id: aiMessageId,
               type: 'ai' as const,
               content: errorContent,
-              step: requestStep
+              step: requestDocKey
             }];
           }
         });
-      }
       }
     } else {
       // 비스트리밍 (OpenAI 직접 호출)
@@ -437,7 +690,7 @@ ${documentContent}
         content: response.message,
         hasApply: !!(response.changes && response.changes.length > 0),
         changes: response.changes,
-        step: requestStep,
+        step: requestDocKey,
         toolsUsed: response.toolsUsed
       };
 
@@ -445,6 +698,7 @@ ${documentContent}
     }
 
     setIsLoading(false);
+    setCurrentToolStatus(null);  // tool 상태 초기화
   };
 
   return (
@@ -552,7 +806,7 @@ ${documentContent}
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-6 bg-gray-50/30">
-        {messages.map((message) => (
+        {messages.filter(msg => !(msg.type === 'ai' && !msg.content)).map((message) => (
           <div
             key={message.id}
             className={`flex items-end gap-2 ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}
@@ -637,21 +891,31 @@ ${documentContent}
             </div>
           </div>
         ))}
-        {/* 스트리밍 중이 아닐 때만 로딩 표시 (마지막 메시지가 user일 때) */}
-        {isLoading && messages.length > 0 && messages[messages.length - 1].type === 'user' && (
+        {/* 스트리밍 중이 아닐 때만 로딩 표시 (마지막 메시지가 user이거나, ai지만 content가 비어있을 때) */}
+        {isLoading && messages.length > 0 && (
+          messages[messages.length - 1].type === 'user' ||
+          (messages[messages.length - 1].type === 'ai' && !messages[messages.length - 1].content)
+        ) && (
           <div className="flex justify-start items-end gap-2">
             <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-blue-600 flex items-center justify-center shadow-md flex-shrink-0 mb-1">
               <Sparkles className="w-4 h-4 text-white" />
             </div>
             <div className="bg-white border border-gray-100 rounded-2xl rounded-tl-sm px-4 py-3 shadow-sm">
-              <div className="flex items-center gap-2">
-                <div className="flex gap-1">
-                  <div className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
-                  <div className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-                  <div className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
-                </div>
-                <span className="text-xs text-gray-500">답변 생성중...</span>
-              </div>
+              {(() => {
+                const statusInfo = getToolStatusInfo(currentToolStatus);
+                return (
+                  <div className="flex items-center gap-2">
+                    <div className="flex gap-1">
+                      <div className={`w-1.5 h-1.5 ${statusInfo.dotColor} rounded-full animate-bounce`} style={{ animationDelay: '0ms' }}></div>
+                      <div className={`w-1.5 h-1.5 ${statusInfo.dotColor} rounded-full animate-bounce`} style={{ animationDelay: '150ms' }}></div>
+                      <div className={`w-1.5 h-1.5 ${statusInfo.dotColor} rounded-full animate-bounce`} style={{ animationDelay: '300ms' }}></div>
+                    </div>
+                    <span className={`text-xs font-medium ${statusInfo.color}`}>
+                      {statusInfo.label}...
+                    </span>
+                  </div>
+                );
+              })()}
             </div>
           </div>
         )}
@@ -661,19 +925,29 @@ ${documentContent}
       {/* Input */}
       <div className="p-4 bg-white/80 backdrop-blur-md relative z-20">
         <form onSubmit={handleSubmit} className="relative group">
-          <div className="absolute inset-0 bg-gradient-to-r from-blue-100 to-indigo-100 rounded-full blur opacity-20 group-hover:opacity-40 transition-opacity duration-300"></div>
-          <input
-            type="text"
+          <div className="absolute inset-0 bg-gradient-to-r from-blue-100 to-indigo-100 rounded-2xl blur opacity-20 group-hover:opacity-40 transition-opacity duration-300"></div>
+          <textarea
+            ref={textareaRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              adjustTextareaHeight();
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                handleSubmit(e);
+              }
+            }}
             placeholder="업무에 관한 무엇이든 물어보고 요청하세요..."
-            className="w-full px-6 py-3.5 pr-14 rounded-full border border-gray-200 bg-white/90 shadow-[0_2px_10px_rgba(0,0,0,0.03)] focus:outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-300 focus:shadow-[0_4px_20px_rgba(37,99,235,0.1)] transition-all duration-300 text-sm relative z-10 placeholder:text-gray-400"
+            rows={1}
+            className="w-full px-6 py-3.5 pr-14 rounded-2xl border border-gray-200 bg-white/90 shadow-[0_2px_10px_rgba(0,0,0,0.03)] focus:outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-300 focus:shadow-[0_4px_20px_rgba(37,99,235,0.1)] transition-all duration-300 text-sm relative z-10 placeholder:text-gray-400 resize-none overflow-y-auto"
             disabled={isLoading}
           />
           <button
             type="submit"
             disabled={isLoading || !input.trim()}
-            className="absolute right-2 top-1/2 -translate-y-1/2 w-10 h-10 bg-gradient-to-br from-blue-600 to-indigo-600 text-white rounded-full flex items-center justify-center shadow-lg hover:shadow-blue-200 hover:scale-105 active:scale-95 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 z-20"
+            className="absolute right-2 bottom-2 w-10 h-10 bg-gradient-to-br from-blue-600 to-indigo-600 text-white rounded-full flex items-center justify-center shadow-lg hover:shadow-blue-200 hover:scale-105 active:scale-95 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 z-20"
           >
             <Send className="w-4 h-4 ml-0.5" />
           </button>

@@ -3,6 +3,40 @@ import { useState, useCallback, useRef } from 'react';
 import { uploadDocumentFlow, DocumentStatus } from '../../../utils/documentApi';
 import type { UploadStatus } from '../types';
 
+// 에러 메시지를 사용자 친화적으로 변환
+function toUserFriendlyError(error: string): string {
+  const lower = error.toLowerCase();
+
+  // API 에러 코드
+  if (lower.includes('upload_request_failed') || lower.includes('s3_upload_failed') || lower.includes('upload_complete_failed')) {
+    return '파일을 처리할 수 없습니다. 올바른 파일인지 확인해주세요.';
+  }
+
+  // 백엔드 에러 메시지 (SSE로 전달됨)
+  if (lower.includes('no valid content') || lower.includes('empty')) {
+    return '문서에서 내용을 추출할 수 없습니다. 다른 파일을 업로드해주세요.';
+  }
+  if (lower.includes('pdf') || lower.includes('parse') || lower.includes('invalid')) {
+    return '파일 형식이 올바르지 않습니다. 다른 파일을 업로드해주세요.';
+  }
+  if (lower.includes('ocr') || lower.includes('scan')) {
+    return '스캔된 문서는 지원하지 않습니다. 텍스트가 포함된 파일을 업로드해주세요.';
+  }
+
+  // 네트워크 관련
+  if (lower.includes('network') || lower.includes('fetch')) {
+    return '네트워크 오류가 발생했습니다. 인터넷 연결을 확인해주세요.';
+  }
+
+  return '파일 업로드에 실패했습니다. 다시 시도해주세요.';
+}
+
+interface RestoreUploadData {
+  filename: string;
+  s3_url: string;
+  convertedPdfUrl?: string;
+}
+
 interface UseFileUploadReturn {
   uploadedFiles: Record<number, File | null>;
   uploadedFileNames: Record<number, string>;
@@ -10,17 +44,35 @@ interface UseFileUploadReturn {
   uploadError: Record<number, string | null>;
   uploadedDocumentIds: Record<number, number | null>;
   uploadedDocumentUrls: Record<number, string | null>;
+  uploadedConvertedPdfUrls: Record<number, string | null>;
   handleFileUpload: (step: number, file: File, docId: number) => Promise<void>;
   removeUploadedFile: (step: number) => void;
   retryUpload: (step: number) => void;
+  restoreUploadState: (step: number, data: RestoreUploadData) => void;
 }
 
-export function useFileUpload(initialUploadedFileNames: Record<number, string> = {}): UseFileUploadReturn {
+interface UseFileUploadOptions {
+  onTemplateDataExtracted?: (step: number, templateData: any) => void;
+}
+
+export function useFileUpload(
+  initialFileNames: Record<number, string> = {},
+  initialFileUrls: Record<number, string> = {},
+  initialConvertedPdfUrls: Record<number, string> = {},
+  options: UseFileUploadOptions = {}
+): UseFileUploadReturn {
+  // 초기 파일명이 있는 step은 'ready' 상태로 초기화
+  const initialStatus = Object.keys(initialFileNames).reduce((acc, key) => {
+    acc[Number(key)] = 'ready';
+    return acc;
+  }, {} as Record<number, UploadStatus>);
+
   const [uploadedFiles, setUploadedFiles] = useState<Record<number, File | null>>({});
-  const [uploadedFileNames, setUploadedFileNames] = useState<Record<number, string>>(initialUploadedFileNames);
+  const [uploadedFileNames, setUploadedFileNames] = useState<Record<number, string>>(initialFileNames);
   const [uploadedDocumentIds, setUploadedDocumentIds] = useState<Record<number, number | null>>({});
-  const [uploadedDocumentUrls, setUploadedDocumentUrls] = useState<Record<number, string | null>>({});
-  const [uploadStatus, setUploadStatus] = useState<Record<number, UploadStatus>>({});
+  const [uploadedDocumentUrls, setUploadedDocumentUrls] = useState<Record<number, string | null>>(initialFileUrls);
+  const [uploadedConvertedPdfUrls, setUploadedConvertedPdfUrls] = useState<Record<number, string | null>>(initialConvertedPdfUrls);
+  const [uploadStatus, setUploadStatus] = useState<Record<number, UploadStatus>>(initialStatus);
   const [uploadError, setUploadError] = useState<Record<number, string | null>>({});
   const [uploadUnsubscribe, setUploadUnsubscribe] = useState<Record<number, (() => void) | null>>({});
 
@@ -52,10 +104,18 @@ export function useFileUpload(initialUploadedFileNames: Record<number, string> =
         onComplete: (status: DocumentStatus) => {
           setUploadStatus(prev => ({ ...prev, [step]: 'ready' }));
           setUploadedDocumentUrls(prev => ({ ...prev, [step]: status.s3_url || null }));
+          if (status.converted_pdf_url) {
+            setUploadedConvertedPdfUrls(prev => ({ ...prev, [step]: status.converted_pdf_url || null }));
+          }
+
+          // 템플릿 데이터 처리
+          if (status.template_data?.is_template && options.onTemplateDataExtracted) {
+            options.onTemplateDataExtracted(step, status.template_data);
+          }
         },
         onError: (error: string) => {
           setUploadStatus(prev => ({ ...prev, [step]: 'error' }));
-          setUploadError(prev => ({ ...prev, [step]: error }));
+          setUploadError(prev => ({ ...prev, [step]: toUserFriendlyError(error) }));
         }
       });
 
@@ -90,6 +150,7 @@ export function useFileUpload(initialUploadedFileNames: Record<number, string> =
     });
     setUploadedDocumentIds(prev => ({ ...prev, [step]: null }));
     setUploadedDocumentUrls(prev => ({ ...prev, [step]: null }));
+    setUploadedConvertedPdfUrls(prev => ({ ...prev, [step]: null }));
     setUploadStatus(prev => ({ ...prev, [step]: 'idle' }));
     setUploadError(prev => ({ ...prev, [step]: null }));
   }, []);
@@ -102,6 +163,15 @@ export function useFileUpload(initialUploadedFileNames: Record<number, string> =
     }
   }, [uploadedFiles, handleFileUpload]);
 
+  // 버전 복원 시 업로드 상태 설정
+  const restoreUploadState = useCallback((step: number, data: RestoreUploadData) => {
+    setUploadedFileNames(prev => ({ ...prev, [step]: data.filename }));
+    setUploadedDocumentUrls(prev => ({ ...prev, [step]: data.s3_url }));
+    setUploadedConvertedPdfUrls(prev => ({ ...prev, [step]: data.convertedPdfUrl || null }));
+    setUploadStatus(prev => ({ ...prev, [step]: 'ready' }));
+    setUploadError(prev => ({ ...prev, [step]: null }));
+  }, []);
+
   return {
     uploadedFiles,
     uploadedFileNames,
@@ -109,8 +179,10 @@ export function useFileUpload(initialUploadedFileNames: Record<number, string> =
     uploadError,
     uploadedDocumentIds,
     uploadedDocumentUrls,
+    uploadedConvertedPdfUrls,
     handleFileUpload,
     removeUploadedFile,
     retryUpload,
+    restoreUploadState,
   };
 }
