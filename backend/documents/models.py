@@ -3,7 +3,7 @@ from django.contrib.auth.models import AbstractUser, BaseUserManager
 
 
 class CustomUserManager(BaseUserManager):
-    """
+    """ 
     emp_no를 USERNAME_FIELD로 사용하는 커스텀 UserManager
     """
     def create_user(self, emp_no, name, password=None, **extra_fields):
