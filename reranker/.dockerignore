@@ -1,0 +1,47 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docs
+README.md
+*.md
+
+# Tests
+test_*.py
+tests/
+
+# 모델 캐시 (서버에서 다운로드하므로)
+.cache/
+.huggingface/
+
+# 이미지 파일
+*.jpg
+*.png
+*.jpeg

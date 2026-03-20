@@ -1,0 +1,8 @@
+fastapi==0.121.2
+uvicorn[standard]==0.38.0
+pydantic==2.12.4
+mxbai-rerank==0.1.6
+torch>=2.0.0
+transformers==4.57.1
+accelerate==1.11.0
+hf-transfer==0.1.9

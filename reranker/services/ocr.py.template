@@ -1,0 +1,57 @@
+"""
+OCR 서비스 - 모델 로딩 및 비즈니스 로직 (템플릿)
+
+사용법:
+1. 이 파일을 ocr.py로 이름 변경
+2. services/__init__.py에 import 추가
+3. 실제 OCR 라이브러리로 구현
+"""
+
+import logging
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+class OCRService:
+    """OCR 모델 관리 및 실행"""
+
+    def __init__(self):
+        self.model: Optional[any] = None  # 실제 OCR 모델 타입으로 변경
+        self.model_name = "your-ocr-model-name"
+
+    async def load_model(self):
+        """모델을 로드합니다"""
+        try:
+            logger.info(f"🔄 OCR 모델 로딩 시작: {self.model_name}")
+            # TODO: 실제 OCR 모델 로딩 코드
+            # self.model = load_ocr_model()
+            logger.info("✅ OCR 모델 로딩 완료")
+        except Exception as e:
+            logger.error(f"❌ OCR 모델 로딩 실패: {str(e)}")
+            self.model = None
+            raise
+
+    def is_ready(self) -> bool:
+        """모델이 준비되었는지 확인"""
+        return self.model is not None
+
+    def process(self, image: str, language: str):
+        """이미지에서 텍스트를 추출합니다"""
+        if not self.is_ready():
+            raise RuntimeError("OCR 모델이 로드되지 않았습니다")
+
+        # TODO: 실제 OCR 처리 로직
+        # result = self.model.process(image, language)
+        # return result
+
+        # 임시 반환값
+        return {
+            "text": "추출된 텍스트",
+            "confidence": 0.95,
+            "language": language
+        }
+
+
+# 전역 서비스 인스턴스
+ocr_service = OCRService()
